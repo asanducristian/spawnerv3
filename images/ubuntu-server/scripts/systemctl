@@ -1,0 +1,20 @@
+#!/bin/bash
+set -euo pipefail
+ACTION="${1:-}"; UNIT="${2:-}"
+[[ -z "$ACTION" || -z "$UNIT" ]] && { echo "Usage: systemctl {start|stop|restart|reload|status} <unit>"; exit 1; }
+case "$UNIT" in
+  nginx|nginx.service) ;;
+  *) echo "System has not been booted with systemd (PID 1). Can't operate."; exit 1 ;;
+esac
+is_running() { pgrep -x nginx >/dev/null 2>&1; }
+case "$ACTION" in
+  status)
+    is_running \
+      && echo "● nginx.service - Active: active (running)" \
+      || echo "● nginx.service - Active: inactive (dead)" ;;
+  start)   is_running || nginx ;;
+  stop)    is_running && (nginx -s quit || pkill -x nginx) || true ;;
+  reload)  nginx -t && nginx -s reload ;;
+  restart) nginx -t; is_running && (nginx -s quit || pkill -x nginx) && sleep 0.5; nginx ;;
+  *)       echo "Unknown action: $ACTION"; exit 1 ;;
+esac

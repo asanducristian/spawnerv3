@@ -3,6 +3,8 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+SHELL ["/bin/bash", "-c"]
+
 # ------------------------------------------------------------------------------
 # Base packages
 # ------------------------------------------------------------------------------
@@ -113,43 +115,9 @@ RUN su -s /bin/bash api -c " \
 # ------------------------------------------------------------------------------
 RUN rm -f /etc/nginx/sites-enabled/default
 
-RUN cat > /etc/nginx/sites-available/000-default.conf << 'EOF'
-server {
-    listen 80 default_server;
-    server_name _;
-    location / {
-        return 404 '{"error":"Domain not configured"}';
-        add_header Content-Type application/json always;
-    }
-}
-EOF
-
-RUN cat > /etc/nginx/sites-available/testwebsite.conf << 'EOF'
-server {
-    listen 80;
-    server_name testwebsite.com;
-    root /var/www/testwebsite.com;
-    index index.html;
-    location / {
-        try_files $uri $uri.html $uri/ =404;
-    }
-}
-EOF
-
-RUN cat > /etc/nginx/sites-available/api.testwebsite.conf << 'EOF'
-server {
-    listen 80;
-    server_name api.testwebsite.com;
-    location / {
-        proxy_pass http://127.0.0.1:3001;
-        proxy_http_version 1.1;
-        proxy_set_header Host              $host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-EOF
+COPY nginx/000-default.conf /etc/nginx/sites-available/000-default.conf
+COPY nginx/testwebsite.conf /etc/nginx/sites-available/testwebsite.conf
+COPY nginx/api.testwebsite.conf /etc/nginx/sites-available/api.testwebsite.conf
 
 RUN ln -s /etc/nginx/sites-available/000-default.conf /etc/nginx/sites-enabled/ && \
     ln -s /etc/nginx/sites-available/testwebsite.conf /etc/nginx/sites-enabled/ && \
@@ -158,37 +126,13 @@ RUN ln -s /etc/nginx/sites-available/000-default.conf /etc/nginx/sites-enabled/ 
 # ------------------------------------------------------------------------------
 # systemctl shim (nginx only)
 # ------------------------------------------------------------------------------
-RUN cat > /usr/local/bin/systemctl << 'SCRIPT'
-#!/bin/bash
-set -euo pipefail
-ACTION="${1:-}"; UNIT="${2:-}"
-[[ -z "$ACTION" || -z "$UNIT" ]] && { echo "Usage: systemctl {start|stop|restart|reload|status} <unit>"; exit 1; }
-case "$UNIT" in
-  nginx|nginx.service) ;;
-  *) echo "System has not been booted with systemd (PID 1). Can't operate."; exit 1 ;;
-esac
-is_running() { pgrep -x nginx >/dev/null 2>&1; }
-case "$ACTION" in
-  status)
-    is_running \
-      && echo "● nginx.service - Active: active (running)" \
-      || echo "● nginx.service - Active: inactive (dead)" ;;
-  start)   is_running || nginx ;;
-  stop)    is_running && (nginx -s quit || pkill -x nginx) || true ;;
-  reload)  nginx -t && nginx -s reload ;;
-  restart) nginx -t; is_running && (nginx -s quit || pkill -x nginx) && sleep 0.5; nginx ;;
-  *)       echo "Unknown action: $ACTION"; exit 1 ;;
-esac
-SCRIPT
+COPY scripts/systemctl /usr/local/bin/systemctl
 RUN chmod +x /usr/local/bin/systemctl
 
 # ------------------------------------------------------------------------------
 # tmux config
 # ------------------------------------------------------------------------------
-RUN cat > /root/.tmux.conf << 'EOF'
-set -g mouse on
-set -g default-terminal "screen-256color"
-EOF
+COPY scripts/tmux.conf /root/.tmux.conf
 
 # ------------------------------------------------------------------------------
 # MOTD
@@ -196,100 +140,16 @@ EOF
 RUN rm -f /etc/update-motd.d/* 2>/dev/null || true && \
     rm -f /etc/legal /etc/issue.net && \
     sed -i 's/^session\s\+optional\s\+pam_motd.so/#&/' /etc/pam.d/sshd
-
-RUN cat > /etc/motd << 'EOF'
-================================================================================
-  DevOps Training Environment - Ubuntu 24.04 LTS
-================================================================================
-
-Services:   SSH :22  |  nginx :80
-Website:    testwebsite.com        (/var/www/testwebsite.com)
-API:        api.testwebsite.com    (proxy -> localhost:3001)
-
-Users:
-  admin   (sudo)          password: admin123
-  api     (PM2 / backend) password: api123
-  webuser (web root)      password: web123
-
-================================================================================
-EOF
+COPY scripts/motd /etc/motd
 
 # ------------------------------------------------------------------------------
-# Dynamic user creation script (runs at container start from USERS env var)
+# Dynamic user creation script + startup script
 # ------------------------------------------------------------------------------
 WORKDIR /app
 
-RUN cat > /app/create-users.sh << 'EOF'
-#!/bin/bash
-set -euo pipefail
-[ -z "${USERS:-}" ] && exit 0
-echo "$USERS" | jq -c '.[]' | while read -r user; do
-  username=$(echo "$user" | jq -r '.username')
-  password=$(echo "$user" | jq -r '.password')
-  is_sudoer=$(echo "$user" | jq -r '.isSudoer')
-  id "$username" >/dev/null 2>&1 || useradd -m -s /bin/bash "$username"
-  echo "$username:$password" | chpasswd
-  usermod -U "$username" 2>/dev/null || true
-  mkdir -p "/home/$username/.ssh"
-  chown "$username:$username" "/home/$username/.ssh"
-  chmod 700 "/home/$username/.ssh"
-  if [ "$is_sudoer" = "true" ]; then
-    echo "$username ALL=(ALL) ALL" > "/etc/sudoers.d/$username"
-    chmod 440 "/etc/sudoers.d/$username"
-    echo "Created sudoer: $username"
-  else
-    echo "Created user: $username"
-  fi
-done
-EOF
-
-RUN chmod +x /app/create-users.sh
-
-# ------------------------------------------------------------------------------
-# Startup script — only starts services, no cloning or building
-# ------------------------------------------------------------------------------
-RUN cat > /app/start.sh << 'EOF'
-#!/bin/bash
-set -uo pipefail
-
-log() { echo "[boot] $*"; }
-
-log "Creating dynamic users..."
-/app/create-users.sh
-
-# Detect backend entry file
-BACKEND_ENTRY=""
-for f in \
-    "$BACKEND_DIR/src/server/js/server.js" \
-    "$BACKEND_DIR/src/server.js" \
-    "$BACKEND_DIR/src/server/server.js" \
-    "$BACKEND_DIR/server.js"; do
-  [ -f "$f" ] && BACKEND_ENTRY="$f" && break
-done
-
-log "Starting SSH..."
-mkdir -p /var/run/sshd
-/usr/sbin/sshd
-
-log "Starting nginx..."
-nginx -t && nginx
-
-if [ -n "$BACKEND_ENTRY" ]; then
-  log "Starting backend ($BACKEND_ENTRY)..."
-  su -s /bin/bash api -c "
-    export PORT=3001
-    pm2 delete backend 2>/dev/null || true
-    pm2 start '$BACKEND_ENTRY' --name backend
-  "
-else
-  log "No backend entry found, skipping."
-fi
-
-log "Boot complete. SSH :22 | nginx :80"
-tail -f /dev/null
-EOF
-
-RUN chmod +x /app/start.sh
+COPY scripts/create-users.sh /app/create-users.sh
+COPY scripts/start.sh /app/start.sh
+RUN chmod +x /app/create-users.sh /app/start.sh
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=10 \
     CMD curl -sf http://localhost/ || exit 1

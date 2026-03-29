@@ -1,0 +1,14 @@
+================================================================================
+  DevOps Training Environment - Ubuntu 24.04 LTS
+================================================================================
+
+Services:   SSH :22  |  nginx :80
+Website:    testwebsite.com        (/var/www/testwebsite.com)
+API:        api.testwebsite.com    (proxy -> localhost:3001)
+
+Users:
+  admin   (sudo)          password: admin123
+  api     (PM2 / backend) password: api123
+  webuser (web root)      password: web123
+
+================================================================================
