@@ -76,7 +76,8 @@ async function main() {
     if (
       req.url === '/health' ||
       req.url.startsWith('/terminal') ||
-      req.url.startsWith('/docs')
+      req.url.startsWith('/docs') ||
+      req.url.startsWith('/domains')
     ) return;
 
     if (apiKey && req.headers['x-api-key'] !== apiKey) {
